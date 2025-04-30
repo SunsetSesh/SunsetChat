@@ -1,21 +1,3 @@
-/*
-	Spacebar: A FOSS re-implementation and extension of the Discord.com backend.
-	Copyright (C) 2023 Spacebar and Spacebar Contributors
-	
-	This program is free software: you can redistribute it and/or modify
-	it under the terms of the GNU Affero General Public License as published
-	by the Free Software Foundation, either version 3 of the License, or
-	(at your option) any later version.
-	
-	This program is distributed in the hope that it will be useful,
-	but WITHOUT ANY WARRANTY; without even the implied warranty of
-	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-	GNU Affero General Public License for more details.
-	
-	You should have received a copy of the GNU Affero General Public License
-	along with this program.  If not, see <https://www.gnu.org/licenses/>.
-*/
-
 import "missing-native-js-functions";
 import dotenv from "dotenv";
 dotenv.config();
@@ -29,9 +11,11 @@ import {
 import ws from "ws";
 import { Connection } from "./events/Connection";
 import http from "http";
+import { setupVoiceSignaling } from "./websocket/voice";
 
 export class Server {
 	public ws: ws.Server;
+	public voiceWs: ws.Server; // Added for voice signaling
 	public port: number;
 	public server: http.Server;
 	public production: boolean;
@@ -55,18 +39,34 @@ export class Server {
 			});
 		}
 
+		// Handle WebSocket upgrades for both gateway and voice
 		this.server.on("upgrade", (request, socket, head) => {
-			this.ws.handleUpgrade(request, socket, head, (socket) => {
-				this.ws.emit("connection", socket, request);
-			});
+			const url = new URL(request.url || "", `http://${request.headers.host}`);
+			if (url.pathname === "/voice") {
+				this.voiceWs.handleUpgrade(request, socket, head, (socket) => {
+					this.voiceWs.emit("connection", socket, request);
+				});
+			} else {
+				this.ws.handleUpgrade(request, socket, head, (socket) => {
+					this.ws.emit("connection", socket, request);
+				});
+			}
 		});
 
+		// Gateway WebSocket server
 		this.ws = new ws.Server({
 			maxPayload: 4096,
 			noServer: true,
 		});
 		this.ws.on("connection", Connection);
 		this.ws.on("error", console.error);
+
+		// Voice WebSocket server
+		this.voiceWs = new ws.Server({
+			maxPayload: 4096,
+			noServer: true,
+		});
+		setupVoiceSignaling(this.voiceWs); // Initialize voice signaling
 	}
 
 	async start(): Promise<void> {
@@ -78,14 +78,18 @@ export class Server {
 		if (!this.server.listening) {
 			this.server.listen(this.port);
 			console.log(`[Gateway] online on 0.0.0.0:${this.port}`);
+			console.log(`[Voice] online on 0.0.0.0:${this.port}/voice`);
 		}
 	}
 
 	async stop() {
 		this.ws.clients.forEach((x) => x.close());
+		this.voiceWs.clients.forEach((x) => x.close()); // Close voice clients
 		this.ws.close(() => {
-			this.server.close(() => {
-				closeDatabase();
+			this.voiceWs.close(() => {
+				this.server.close(() => {
+					closeDatabase();
+				});
 			});
 		});
 	}
